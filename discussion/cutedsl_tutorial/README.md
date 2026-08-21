@@ -24,12 +24,14 @@
 | 6 | [Swizzle 与 ComposedLayout](06_swizzle_and_composed_layout.md) | 完成 | 2 个示例 | L0/L1 通过（4.7.0） |
 | 7 | [Tensor、切片与坐标 Tensor](07_tensor_views.md) | 完成 | 2 个示例 | L1 通过（4.7.0） |
 | 8 | [TensorSSA](08_tensorssa.md) | 完成 | 1 个示例 | L1 通过（4.7.0） |
-| 9 | 执行层级、索引与边界 | 待编写 | 标量 vector add 已验证 | L2 边界样例通过（4.7.0） |
-| 10 | TiledCopy 与 TV Layout | 待编写 | 待编写 | — |
+| 9 | [执行层级、索引与边界处理](09_execution_hierarchy_and_boundaries.md) | 完成 | 2 个示例 | L1/L2 通过（4.7.0） |
+| 10 | [TiledCopy 与 Thread-Value Layout](10_tiled_copy_and_tv_layout.md) | 完成 | 2 个示例 | L0/L1/L2/L4 通过（4.7.0） |
+
+第一阶段已形成完整闭环：语言 staging → Layout 代数 → Tensor/TensorSSA → execution ownership → predicated TiledCopy。第 10 章的完整 tile 路径已从 PTX 确认 128-bit global load/store；性能 benchmark 留到第 29 章的统一方法中进行。
 
 ### 阶段二：SMEM、同步、TMA、流水线与规约
 
-对应第 11–16 章，尚未开始正文。
+对应第 11–16 章，尚未开始正文。下一章从经典 SMEM tiled kernel 开始，并复用第一阶段建立的 TV ownership。
 
 ### 阶段三：三代 Tensor Core 与渐进 GEMM
 

@@ -343,6 +343,151 @@ PASS
 
 结论：memory Tensor load、RMEM fragment store/load、TensorSSA elementwise/broadcast、`(None,1)` 规约 profile 和 `(None,1)` slice 均与 PyTorch reference 精确一致，L1 通过。该示例为单线程静态 shape，不覆盖跨线程规约。
 
+## 第 9 章：执行层级、索引与边界处理
+
+验证代码：
+
+- [`09_execution_hierarchy/execution_hierarchy.py`](../code/09_execution_hierarchy/execution_hierarchy.py)
+- [`09_execution_hierarchy/vector_add_masked.py`](../code/09_execution_hierarchy/vector_add_masked.py)
+
+### L1：执行层级与线性索引
+
+执行命令：
+
+```bash
+cd /volume/njiang/workspace/sandbox/cutlass
+.venv-cutedsl-4.7/bin/python \
+  discussion/code/09_execution_hierarchy/execution_hierarchy.py
+```
+
+关键输出：
+
+```text
+columns=tx,ty,bx,by,lane,warp,warpgroup,thread_linear,block_linear,global_linear
+row 0: [0,0,0,0,0,0,0,0,0,0]
+row 31: [31,0,0,0,31,0,0,31,0,31]
+row 32: [0,1,0,0,0,1,0,32,0,32]
+row 127: [31,3,0,0,31,3,0,127,0,127]
+row 128: [0,4,0,0,0,4,1,128,0,128]
+row 255: [31,7,0,0,31,7,1,255,0,255]
+row 256: [0,0,1,0,0,0,0,0,1,256]
+row 1023: [31,7,1,1,31,7,1,255,3,1023]
+PASS
+```
+
+结论：
+
+- 二维 block `(32, 8, 1)` 和二维 grid `(2, 2, 1)` 的 1024 条记录均与独立的 CPU 参考实现逐项一致；
+- `lane_idx`、`warp_idx`、逻辑 warpgroup 编号、block 内线性线程号和全局线性线程号的边界点均符合预期；
+- 本例中的 warpgroup 是为了讲解而按连续 4 个 warp 分组得到的逻辑编号，不把它冒充为某条硬件 warpgroup 指令的执行语义。
+
+### L2：动态形状、残块和坐标谓词
+
+执行命令：
+
+```bash
+cd /volume/njiang/workspace/sandbox/cutlass
+.venv-cutedsl-4.7/bin/python \
+  discussion/code/09_execution_hierarchy/vector_add_masked.py
+```
+
+关键输出：
+
+```text
+shape=(1,1), grid=(1,1), tail_columns=1, max_abs_error=0.0e+00
+shape=(3,127), grid=(1,3), tail_columns=127, max_abs_error=0.0e+00
+shape=(3,128), grid=(1,3), tail_columns=0, max_abs_error=0.0e+00
+shape=(5,129), grid=(2,5), tail_columns=1, max_abs_error=0.0e+00
+shape=(7,1003), grid=(8,7), tail_columns=107, max_abs_error=0.0e+00
+PASS
+```
+
+结论：
+
+- 同一个动态形状编译句柄覆盖整块、单元素、差一个元素和多 CTA 残块等情况；
+- 数据 Tensor 与 identity Tensor 使用相同的 `local_tile`，再通过 `cute.elem_less` 生成坐标谓词；
+- 谓词同时保护输入读取和输出写回；输出缓冲区预填 `NaN`，因此验证也能发现合法位置漏写；
+- 五组形状均与 PyTorch 参考结果精确一致。
+
+---
+
+## 第 10 章：TiledCopy 与线程—值布局
+
+验证代码：
+
+- [`10_tiled_copy/tiled_copy_visual.py`](../code/10_tiled_copy/tiled_copy_visual.py)
+- [`10_tiled_copy/vectorized_elementwise.py`](../code/10_tiled_copy/vectorized_elementwise.py)
+
+### L0：手算 TV Layout 与覆盖性证明
+
+执行命令：
+
+```bash
+cd /volume/njiang/workspace/sandbox/cutlass
+.venv-cutedsl-4.7/bin/python \
+  discussion/code/10_tiled_copy/tiled_copy_visual.py
+```
+
+关键输出：
+
+```text
+thr_layout=(2,3):(3,1)
+val_layout=(2,2):(2,1)
+tiler_mn=(4, 6)
+tv_layout=((3,2),(2,2)):((8,2),(4,1))
+tiled_copy_tiler=(4:1, 6:1)
+thread 0: partition_shape=((1,(2,2)),1,1)
+  (0,0)->0->(0,0)
+  (0,3)->5->(1,1)
+thread 5: partition_shape=((1,(2,2)),1,1)
+  (5,0)->18->(2,4)
+  (5,3)->23->(3,5)
+PASS
+```
+
+结论：
+
+- 6 个线程、每线程 4 个值恰好覆盖 `4 x 6` 的逻辑 tile；
+- 程序逐项验证了 `thread,value -> logical index -> coordinate` 与 `TiledCopy` 分区结果的一致性；
+- 映射满足单射，且定义域、值域大小同为 24，因此完成了“无重叠、无遗漏”的有限覆盖证明。
+
+### L1/L2/L4：显式 128-bit 路径、残块路径与 PTX 证据
+
+执行命令：
+
+```bash
+cd /volume/njiang/workspace/sandbox/cutlass
+.venv-cutedsl-4.7/bin/python \
+  discussion/code/10_tiled_copy/vectorized_elementwise.py
+```
+
+关键输出：
+
+```text
+[aligned] tiler_mn=(1, 512)
+[aligned] tv_layout=(128,4):(4,1)
+aligned shape=(4, 1024), max_abs_error=0.0e+00, ptx_vector_loads=2, ptx_vector_stores=1
+PTX: ld.global.v2.b64 {%rd8,%rd9}, [%rd5];
+PTX: ld.global.v2.b64 {%rd10,%rd11}, [%rd6];
+PTX: st.global.v2.b64 [%rd7], {%rd13,%rd12};
+masked shape=(1,1), cta_tiles=1, tail_values=1, max_abs_error=0.0e+00
+masked shape=(3,511), cta_tiles=3, tail_values=511, max_abs_error=0.0e+00
+masked shape=(3,512), cta_tiles=3, tail_values=0, max_abs_error=0.0e+00
+masked shape=(5,513), cta_tiles=10, tail_values=1, max_abs_error=0.0e+00
+masked shape=(7,1003), cta_tiles=14, tail_values=491, max_abs_error=0.0e+00
+PASS
+```
+
+结论：
+
+- 两条路径共用 `(128, 4):(4, 1)` 的 TV Layout：128 个线程各拥有连续 4 个 FP32 元素，一个 CTA 处理 512 个元素；
+- 对满足完整 tile 和对齐前提的路径，两个输入读取和一个输出写回均使用显式 128-bit Copy Atom；数值结果精确一致；
+- 保留下来的 PTX 中出现两条 `ld.global.v2.b64` 和一条 `st.global.v2.b64`。这里 `v2.b64` 与常见的 `v4.b32` 都表示 128-bit 传输，不能只按一种文本拼写判断向量化；
+- 通用残块路径使用逐 value 谓词，越界输入 fragment 先填充加法单位元 0，再只对合法位置读写；五组动态形状均精确通过；
+- 显式 128-bit 结论只属于满足完整 tile 与对齐契约的路径，不外推到逐 value 谓词的通用残块路径。
+
+---
+
 ## 后续记录约定
 
 每个新示例至少记录：
