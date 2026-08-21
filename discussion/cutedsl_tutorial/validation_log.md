@@ -195,6 +195,154 @@ PASS
 - `CUTE_DSL_KEEP=ir-debug` 保存的原始 IR 含两个 `scf.for`、一个 `scf.while` 和两个 `scf.if`。
 - `range_constexpr(4)` 没有产生额外的 `scf.for`，为编译期展开提供 L4 结构证据。
 
+## L0/L1：Layout 基础与动态 Layout
+
+代码：[layout_basics.py](../code/04_layout/layout_basics.py)
+
+```bash
+cd /volume/njiang/workspace/sandbox/cutedsl_tutorial/code/04_layout
+CUDA_VISIBLE_DEVICES=0 /volume/njiang/workspace/sandbox/.venv-cutedsl-4.7/bin/python layout_basics.py
+```
+
+关键输出：
+
+```text
+left_major=(3,4):(1,3)
+row_major=(3,4):(4,1)
+padded=(3,4):(8,1)
+broadcast_rows=(3,4):(0,1)
+hierarchical: rank=2, depth=2, size=24, cosize=24
+dynamic case shape=(3, 4), stride=(8, 1): [0, 1, 2, 3, 8, 9, 10, 11, 16, 17, 18, 19]
+dynamic case shape=(2, 5), stride=(7, 1): [0, 1, 2, 3, 4, 7, 8, 9, 10, 11]
+PASS
+```
+
+结论：静态 Layout 构造、层级属性、映射表与 identity coordinate 的 L0 断言通过；同一 compiled handle 在 GPU 上正确处理两组动态 shape/leading dimension，L1 通过。
+
+## L0：Layout 代数
+
+代码：[layout_algebra_lab.py](../code/05_layout_algebra/layout_algebra_lab.py)
+
+```bash
+cd /volume/njiang/workspace/sandbox/cutedsl_tutorial/code/05_layout_algebra
+/volume/njiang/workspace/sandbox/.venv-cutedsl-4.7/bin/python layout_algebra_lab.py
+```
+
+关键输出：
+
+```text
+coalesce: ((2,(3,4)),(3,2),1):((4,(8,24)),(2,6),12) -> (24,6):(4,2)
+composition: (6,2):(8,2) o (4,3):(3,1) -> ((2,2),3):((24,2),8)
+logical_divide=((2,4),(3,2)):((6,12),(1,3))
+zipped_divide=((2,3),(4,2)):((6,1),(12,3))
+tiled_divide=((2,3),4,2):((6,1),12,3)
+flat_divide=(2,3,4,2):(6,1,12,3)
+complement(4:1, 24)=6:4
+right_inverse=(3,2):(2,1)
+left_inverse=(3,2):(2,1)
+tile_to_shape((2,2):(2,1), (4,6))=((2,2),(2,3)):((2,12),(1,4))
+PASS
+```
+
+结论：`coalesce` 映射保持、composition 复合等式、divide/product size、complement 覆盖、inverse 左右复合和结构变换断言全部通过。该示例只做生成/编译阶段结构验证，记为 L0。
+
+## L0/L1：Swizzle 与 ComposedLayout
+
+代码：[swizzle_visualizer.py](../code/06_swizzle/swizzle_visualizer.py)、[smem_bank_probe.py](../code/06_swizzle/smem_bank_probe.py)
+
+```bash
+cd /volume/njiang/workspace/sandbox/cutedsl_tutorial/code/06_swizzle
+/volume/njiang/workspace/sandbox/.venv-cutedsl-4.7/bin/python swizzle_visualizer.py
+CUDA_VISIBLE_DEVICES=0 /volume/njiang/workspace/sandbox/.venv-cutedsl-4.7/bin/python smem_bank_probe.py
+```
+
+可视化关键输出：
+
+```text
+outer=32:32
+swizzle=S<5,0,5>
+composed=S<5,0,5> o 0 o 32:32
+0: 0 -> 0 -> 0
+1: 32 -> 33 -> 1
+31: 992 -> 1023 -> 31
+PASS
+```
+
+SMEM 往返输出：
+
+```text
+dst=[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 19.0, 20.0, 21.0, 22.0, 23.0, 24.0, 25.0, 26.0, 27.0, 28.0, 29.0, 30.0, 31.0]
+PASS
+```
+
+结论：ComposedLayout 映射、bank 静态模型和 XOR involution 的 L0 断言通过；32 个 thread 使用 canonical `s128b` 成对变换物理 SMEM pointer 后精确写回 lane id，L1 通过。
+
+开发中确认：低层逐 lane `apply_swizzle(...).store()` 不应与按 CuTe Tensor/128-bit vector remap 的 `load_swizzled()` 混搭。修正后的探针让 physical-pointer 写读保持同一抽象层。本节不声称测得 bank-conflict 性能。
+
+## L1：Tensor tile 与 coordinate Tensor
+
+代码：[tensor_views.py](../code/07_tensor/tensor_views.py)
+
+```bash
+cd /volume/njiang/workspace/sandbox/cutedsl_tutorial/code/07_tensor
+CUDA_VISIBLE_DEVICES=0 /volume/njiang/workspace/sandbox/.venv-cutedsl-4.7/bin/python tensor_views.py
+```
+
+输出：
+
+```text
+dst=
+tensor([[ 0.,  2.,  4.,  6.,  8., 10.],
+        [16., 18., 20., 22., 24., 26.],
+        [32., 34., 36., 38., 40., 42.],
+        [48., 50., 52., 54., 56., 58.]])
+PASS
+```
+
+结论：四个 CTA 对 data Tensor 和 identity Tensor 应用相同 `(2,3)` `local_tile`，由 coordinate Tensor 恢复的全局 row/column 与 PyTorch reference 精确一致，L1 通过。
+
+## L1：动态 Tensor Layout 的 compiled-handle 复用
+
+代码：[dynamic_layout.py](../code/07_tensor/dynamic_layout.py)
+
+```bash
+cd /volume/njiang/workspace/sandbox/cutedsl_tutorial/code/07_tensor
+CUDA_VISIBLE_DEVICES=0 /volume/njiang/workspace/sandbox/.venv-cutedsl-4.7/bin/python dynamic_layout.py
+```
+
+输出：
+
+```text
+n=17, first=-6.0, last=26.0
+n=257, first=-6.0, last=506.0
+n=1003, first=-6.0, last=1998.0
+PASS
+```
+
+结论：用长度 17 的动态一维 Layout 建立一次 compiled handle 后，同一 handle 正确执行长度 17、257、1003，并与 `src * 2` 精确一致。该 L1 验证覆盖动态 extent 和非整 block 尾部，不覆盖非连续动态 stride。
+
+## L1：TensorSSA 寄存器数据流
+
+代码：[tensorssa_ops.py](../code/08_tensorssa/tensorssa_ops.py)
+
+```bash
+cd /volume/njiang/workspace/sandbox/cutedsl_tutorial/code/08_tensorssa
+CUDA_VISIBLE_DEVICES=0 /volume/njiang/workspace/sandbox/.venv-cutedsl-4.7/bin/python tensorssa_ops.py
+```
+
+输出：
+
+```text
+dst=
+tensor([[12.5000, 15.0000, 17.5000],
+        [28.5000, 31.0000, 33.5000]])
+row_sums=[45.0, 93.0]
+selected_column=[15.0, 31.0]
+PASS
+```
+
+结论：memory Tensor load、RMEM fragment store/load、TensorSSA elementwise/broadcast、`(None,1)` 规约 profile 和 `(None,1)` slice 均与 PyTorch reference 精确一致，L1 通过。该示例为单线程静态 shape，不覆盖跨线程规约。
+
 ## 后续记录约定
 
 每个新示例至少记录：

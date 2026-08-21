@@ -7,4 +7,4 @@
 - [B200 实机验证日志](cutedsl_tutorial/validation_log.md)
 - [已验证示例：Vector Add](code/01_vector_add/README.md)
 
-后续章节正文放在 `discussion/cutedsl_tutorial/`，配套可执行示例放在 `discussion/code/`。教程正在推进第一交付阶段；第 0–3 章及其 B200 验证已完成。
+后续章节正文放在 `discussion/cutedsl_tutorial/`，配套可执行示例放在 `discussion/code/`。教程正在推进第一交付阶段；第 0–8 章正文与配套代码已完成，并已在 CuTe DSL 4.7.0 / NVIDIA B200 上完成相应等级验证。

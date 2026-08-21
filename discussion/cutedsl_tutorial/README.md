@@ -19,11 +19,11 @@
 | 1 | [最小程序与执行模型](01_execution_model.md) | 完成 | 2 个示例 | L1 通过（4.7.0） |
 | 2 | [类型系统、静态值与动态值](02_types_and_values.md) | 完成 | 3 个示例 | L0/L1 通过（4.7.0） |
 | 3 | [控制流与元编程](03_control_flow_and_metaprogramming.md) | 完成 | 1 个示例 | L1/L4 通过（4.7.0） |
-| 4 | Layout 基础 | 待编写 | 待编写 | — |
-| 5 | Layout 代数 | 待编写 | 待编写 | — |
-| 6 | Swizzle 与 ComposedLayout | 待编写 | 待编写 | — |
-| 7 | Tensor、切片与坐标 Tensor | 待编写 | 待编写 | — |
-| 8 | TensorSSA | 待编写 | 待编写 | — |
+| 4 | [Layout 是坐标到索引的函数](04_layout_basics.md) | 完成 | 1 个示例 | L0/L1 通过（4.7.0） |
+| 5 | [Layout 代数](05_layout_algebra.md) | 完成 | 1 个示例 | L0 通过（4.7.0） |
+| 6 | [Swizzle 与 ComposedLayout](06_swizzle_and_composed_layout.md) | 完成 | 2 个示例 | L0/L1 通过（4.7.0） |
+| 7 | [Tensor、切片与坐标 Tensor](07_tensor_views.md) | 完成 | 2 个示例 | L1 通过（4.7.0） |
+| 8 | [TensorSSA](08_tensorssa.md) | 完成 | 1 个示例 | L1 通过（4.7.0） |
 | 9 | 执行层级、索引与边界 | 待编写 | 标量 vector add 已验证 | L2 边界样例通过（4.7.0） |
 | 10 | TiledCopy 与 TV Layout | 待编写 | 待编写 | — |
 
