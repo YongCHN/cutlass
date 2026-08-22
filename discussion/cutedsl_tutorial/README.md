@@ -37,12 +37,14 @@
 | 12 | [warp/CTA/cluster 同步原语](12_synchronization_primitives.md) | 完成 | 3 个示例 | L0/L1/L2/L4 通过（4.7.0） |
 | 13 | [`cp.async` 与 `ldmatrix/stmatrix`](13_cp_async_and_matrix_fragments.md) | 完成 | 2 个示例、7 个 specialization | L0/L1/L2/L4 通过（4.7.0） |
 | 14 | [TMA 从 descriptor 到 partition](14_tma_descriptor_and_partition.md) | 完成 | 3 个示例 | L0/L1/L2/L4 通过（4.7.0） |
+| 15 | [多级流水线与 warp specialization](15_multistage_pipeline_and_warpspec.md) | 完成 | 2 个示例、5 个 stage specialization | L0/L1/L2/L4 通过（4.7.0） |
+| 16 | [分层规约与 Online Softmax](16_hierarchical_reduction_and_softmax.md) | 完成 | 2 个示例 | L0/L1/L2/L4 通过（4.7.0） |
 
-第 11 章建立同步 SMEM baseline，第 12 章把参与者、可见性、mbarrier phase 和 cluster lifetime 组织成统一同步协议；第 13 章完成 SM80 copy group 与 warp matrix fragment 数据路径，第 14 章完成 TMA descriptor、partition、proxy ordering 和 multicast。下一章把这些 primitive 组织成多 stage、warp-specialized pipeline。
+第 11–16 章已经形成第二阶段闭环：同步 SMEM baseline → participant/completion 协议 → SM80 copy group 与 warp matrix fragment → TMA descriptor/partition → 多级 warp-specialized pipeline → thread/warp/CTA/cluster reduction 与 online Softmax。下一阶段从第 17 章的 MMA 公共模型开始，逐代进入 SM80、SM90 和 SM100 Tensor Core。
 
 ### 阶段三：三代 Tensor Core 与渐进 GEMM
 
-对应第 17–24 章，尚未开始正文。
+对应第 17–24 章，下一步从第 17 章开始。
 
 ### 阶段四：生产主题与工程化
 

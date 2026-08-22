@@ -836,6 +836,167 @@ PASS
 
 ---
 
+## 第 15 章：多级流水线与 warp specialization
+
+验证代码：
+
+- [`15_pipeline/pipeline_software_fill.py`](../code/15_pipeline/pipeline_software_fill.py)
+- [`15_pipeline/tma_pipeline_warpspec.py`](../code/15_pipeline/tma_pipeline_warpspec.py)
+
+### L1/L2/L4：2/3/4-stage software-fill pipeline
+
+执行命令：
+
+```bash
+cd /volume/njiang/workspace/sandbox/cutlass
+CUDA_VISIBLE_DEVICES=0 \
+  /volume/njiang/workspace/sandbox/.venv-cutedsl-4.7/bin/python \
+  discussion/code/15_pipeline/pipeline_software_fill.py
+```
+
+关键输出：
+
+```text
+stages=2, tiles=1, trace=[0:(s0,p0)]: PASS
+stages=2, tiles=5, trace=[0:(s0,p0) 1:(s1,p0) 2:(s0,p1) 3:(s1,p1) 4:(s0,p0)]: PASS
+stages=3, tiles=7, trace=[0:(s0,p0) 1:(s1,p0) 2:(s2,p0) 3:(s0,p1) 4:(s1,p1) 5:(s2,p1) 6:(s0,p0)]: PASS
+stages=4, tiles=9, trace=[0:(s0,p0) 1:(s1,p0) 2:(s2,p0) 3:(s3,p0) 4:(s0,p1) 5:(s1,p1) 6:(s2,p1) 7:(s3,p1) 8:(s0,p0)]: PASS
+PTX init: mbarrier.init.shared.b64 ...
+PTX arrive: mbarrier.arrive.shared.b64 ...
+PTX wait: mbarrier.try_wait.parity.acquire.cta.shared::cta.b64 ...
+PTX warp_publish: bar.warp.sync -1;
+PTX invalidate: mbarrier.inval.shared.b64 ...
+PASS
+```
+
+结论：
+
+- 2、3、4-stage 三个 specialization 共验证 14 组 runtime tile count；
+- case 覆盖部分 fill、刚好填满、第一次 stage reuse 和 phase 回到 0；
+- producer/consumer 分别使用 warp 0/1，每 stage 都有 full/empty mbarrier；
+- commit/release 前均有 full-mask warp publication，退出前 CTA drain 后才 invalidate；
+- 全部输出与输入逐位一致，五类 mbarrier/warp 指令族得到 PTX 证据。
+
+### L1/L2/L4：warp-specialized TMA pipeline
+
+执行命令：
+
+```bash
+cd /volume/njiang/workspace/sandbox/cutlass
+CUDA_VISIBLE_DEVICES=0 \
+  /volume/njiang/workspace/sandbox/.venv-cutedsl-4.7/bin/python \
+  discussion/code/15_pipeline/tma_pipeline_warpspec.py
+```
+
+输出：
+
+```text
+stages=2, tiles=1, shape=(128, 64), wraps=0: PASS
+stages=2, tiles=2, shape=(128, 128), wraps=1: PASS
+stages=2, tiles=3, shape=(128, 192), wraps=1: PASS
+stages=2, tiles=5, shape=(128, 320), wraps=2: PASS
+stages=3, tiles=1, shape=(128, 64), wraps=0: PASS
+stages=3, tiles=3, shape=(128, 192), wraps=1: PASS
+stages=3, tiles=4, shape=(128, 256), wraps=1: PASS
+stages=3, tiles=7, shape=(128, 448), wraps=2: PASS
+PTX tma_load: cp.async.bulk.tensor.2d.shared::cta.global.tile.mbarrier::complete_tx::bytes ...
+PTX expect_tx: mbarrier.arrive.expect_tx.shared.b64 ...
+PTX wait: mbarrier.try_wait.parity.acquire.cta.shared::cta.b64 ...
+PTX release: mbarrier.arrive.shared.b64 ...
+PTX invalidate: mbarrier.inval.shared.b64 ...
+PASS
+```
+
+结论：
+
+- warp 0 执行 TMA producer prologue/steady loop，warp 1 读取 swizzled SMEM 并 release；
+- 2/3-stage 共八组 shape 覆盖 tile count 小于、等于和大于 stage depth，以及两次 wrap；
+- TMA transaction completion、producer acquire、consumer release 和 tail lifetime 形成闭环；
+- 所有 FP16 输出 bit-exact，retained PTX 确认 TMA、expect-tx 和 mbarrier state transitions；
+- 本章不根据指令存在声称真实 latency overlap，L3 timeline/性能留待统一 benchmark。
+
+---
+
+## 第 16 章：分层规约与 Online Softmax
+
+验证代码：
+
+- [`16_reduction_and_softmax/reduction_ladder.py`](../code/16_reduction_and_softmax/reduction_ladder.py)
+- [`16_reduction_and_softmax/online_softmax.py`](../code/16_reduction_and_softmax/online_softmax.py)
+
+### L1/L2/L4：thread-vector → warp → CTA reduction ladder
+
+执行命令：
+
+```bash
+cd /volume/njiang/workspace/sandbox/cutlass
+CUDA_VISIBLE_DEVICES=0 \
+  /volume/njiang/workspace/sandbox/.venv-cutedsl-4.7/bin/python \
+  discussion/code/16_reduction_and_softmax/reduction_ladder.py
+```
+
+输出：
+
+```text
+rows=1, width=128, items/thread=1: PASS
+rows=7, width=128, items/thread=1: PASS
+rows=33, width=128, items/thread=1: PASS
+rows=1, width=512, items/thread=4: PASS
+rows=7, width=512, items/thread=4: PASS
+rows=33, width=512, items/thread=4: PASS
+rows=1, width=1024, items/thread=8: PASS
+rows=7, width=1024, items/thread=8: PASS
+rows=33, width=1024, items/thread=8: PASS
+PTX vector_load: ld.global.v8.b32 ...
+PTX shuffle: shfl.sync.bfly.b32 ...
+PTX shared_store: st.shared.b32 ...
+PTX cta_barrier: barrier.sync 0;
+PASS
+```
+
+结论：
+
+- 每线程先规约 1/4/8 个连续 FP32，warp butterfly 后由四个 warp leaders 写 SMEM partials，warp 0 完成 CTA merge；
+- sum/max 同时验证，使用小整数值域确保 FP32 sum 与 reference bit-exact；
+- 三个 row width 和三个 row count 共九组均通过；
+- PTX 确认 x8 vector load、shuffle、shared store 和 CTA publication。
+
+### L1/L2/L4：ragged-mask online Softmax
+
+执行命令：
+
+```bash
+cd /volume/njiang/workspace/sandbox/cutlass
+CUDA_VISIBLE_DEVICES=0 \
+  /volume/njiang/workspace/sandbox/.venv-cutedsl-4.7/bin/python \
+  discussion/code/16_reduction_and_softmax/online_softmax.py
+```
+
+输出：
+
+```text
+shape=(1,1), lengths=[1], max_error=0.000e+00: PASS
+shape=(5,31), lengths=[1, 8, 16, 24, 31], max_error=5.960e-08: PASS
+shape=(7,128), lengths=[1, 22, 43, 64, 86, 107, 128], max_error=1.192e-07: PASS
+shape=(9,257), lengths=[1, 33, 65, 97, 129, 161, 193, 225, 257], max_error=1.192e-07: PASS
+shape=(4,1000), lengths=[1, 334, 667, 1000], max_error=2.980e-08: PASS
+PTX shuffle: shfl.sync.bfly.b32 ...
+PTX exp: ex2.approx.ftz.f32 ...
+PTX shared_store: st.shared.b32 ...
+PTX cta_barrier: barrier.sync 0;
+PASS
+```
+
+结论：
+
+- thread-local online scan、warp `(m,l)` merge、SMEM cross-warp merge 和 second-pass normalize 形成完整两遍算法；
+- runtime lengths 覆盖 sub-warp、warp residue、CTA width、多轮动态 loop 和 1000-column row；
+- invalid positions作为 identity operands，仍参与所有 collectives，输出固定为 0；
+- probability、row sum 和内部 `(row_max,row_exp_sum)` stats 均与 PyTorch reference 对照；
+- fast exponential lower 为 `ex2.approx.ftz.f32`，五组最大逐元素误差不超过 `1.192e-7`，在记录的 tolerance 内通过。
+
+---
+
 ## 后续记录约定
 
 每个新示例至少记录：
