@@ -4,7 +4,7 @@
 
 ## 验证环境
 
-验证日期：2026-08-21
+验证日期：2026-08-21 至 2026-08-22
 
 | 项目 | 值 |
 |---|---|
@@ -485,6 +485,354 @@ PASS
 - 保留下来的 PTX 中出现两条 `ld.global.v2.b64` 和一条 `st.global.v2.b64`。这里 `v2.b64` 与常见的 `v4.b32` 都表示 128-bit 传输，不能只按一种文本拼写判断向量化；
 - 通用残块路径使用逐 value 谓词，越界输入 fragment 先填充加法单位元 0，再只对合法位置读写；五组动态形状均精确通过；
 - 显式 128-bit 结论只属于满足完整 tile 与对齐契约的路径，不外推到逐 value 谓词的通用残块路径。
+
+---
+
+## 第 11 章：Shared Memory 分配与经典 tiled kernel
+
+验证代码：[`11_shared_memory/tiled_transpose.py`](../code/11_shared_memory/tiled_transpose.py)
+
+### 首次编译问题：动态 shape 不能进入 Python `assert`
+
+初版在 `@cute.jit` 中写了：
+
+```python
+assert src.shape[0] == dst.shape[1]
+```
+
+编译器正确报告 `PHASE_REQUIRES_CONSTANT`：动态 Tensor extent 是 staged runtime value，不能作为 Python `assert` 的条件。修复方式不是增加 `assume`，而是由 host test harness 构造严格匹配的 transposed destination；kernel 只消费这项 runtime contract。
+
+这与第 2、3 章的 staging 规则一致，也说明 `assume`、compile-time assert 和 runtime shape validation 不能混为一谈。
+
+### L0/L1/L2/L4：SMEM 容量、residue、buffer reuse 与 PTX
+
+执行命令：
+
+```bash
+cd /volume/njiang/workspace/sandbox/cutlass
+/volume/njiang/workspace/sandbox/.venv-cutedsl-4.7/bin/python \
+  discussion/code/11_shared_memory/tiled_transpose.py
+```
+
+关键输出：
+
+```text
+pad=0, shape=(1,1), smem_bytes=4096, grid=(1,1), max_abs_error=0.0e+00
+pad=0, shape=(31,33), smem_bytes=4096, grid=(2,1), max_abs_error=0.0e+00
+pad=0, shape=(32,32), smem_bytes=4096, grid=(1,1), max_abs_error=0.0e+00
+pad=0, shape=(65,67), smem_bytes=4096, grid=(3,2), max_abs_error=0.0e+00
+pad=0, shape=(97,129), smem_bytes=4096, grid=(5,2), max_abs_error=0.0e+00
+pad=1, shape=(1,1), smem_bytes=4224, grid=(1,1), max_abs_error=0.0e+00
+pad=1, shape=(31,33), smem_bytes=4224, grid=(2,1), max_abs_error=0.0e+00
+pad=1, shape=(32,32), smem_bytes=4224, grid=(1,1), max_abs_error=0.0e+00
+pad=1, shape=(65,67), smem_bytes=4224, grid=(3,2), max_abs_error=0.0e+00
+pad=1, shape=(97,129), smem_bytes=4224, grid=(5,2), max_abs_error=0.0e+00
+PTX shared_loads=16, shared_stores=32, barriers=8
+PTX: ld.shared.b32  %r45, [%r16];
+PTX: st.shared.b32  [%r10], %r38;
+PTX: bar.sync  0;
+PTX: bar.sync  0;
+PASS
+```
+
+结论：
+
+- compact `(32,32):(32,1)` 和 padded `(32,33):(33,1)` specialization 的自动 launch SMEM 分别为 4096 和 4224 bytes，与 `cosize * sizeof(FP32)` 精确一致；
+- 两个 specialization 都复用一个 dynamic-shape compiled handle，覆盖单元素、双向 residue、完整 tile、多 CTA 和每 CTA 第二轮整体越界；
+- 输出预填 `NaN`，所有结果与 `src.transpose(0,1)` 精确一致；
+- 每个 CTA 复用同一 SMEM buffer 处理两个 row tiles，producer→consumer 和 consumer→next-producer 两条 CTA barrier 均存在；
+- PTX 确认 shared load/store 与 `bar.sync`；
+- compact/padded bank ownership 完成 L0 映射证明，但本章未进行 L3 benchmark，不把映射差异表述成实测性能提升。
+
+---
+
+## 第 12 章：warp/CTA/cluster 同步原语
+
+验证代码：
+
+- [`12_synchronization/warp_collectives.py`](../code/12_synchronization/warp_collectives.py)
+- [`12_synchronization/mbarrier_pingpong.py`](../code/12_synchronization/mbarrier_pingpong.py)
+- [`12_synchronization/cluster_dsmem_ring.py`](../code/12_synchronization/cluster_dsmem_ring.py)
+
+### L1/L4：warp collectives 与 named CTA barrier
+
+执行命令：
+
+```bash
+cd /volume/njiang/workspace/sandbox/cutlass
+/volume/njiang/workspace/sandbox/.venv-cutedsl-4.7/bin/python \
+  discussion/code/12_synchronization/warp_collectives.py
+```
+
+关键输出：
+
+```text
+warp PASS: elected_lane=0, ballot=0xff, broadcast=70, redux_sum=496
+cta PASS: handoff=0xc0de, any_lane_zero=1, even_count=32
+PTX elect: elect.sync  %r7|%p4, -1;
+PTX vote: vote.sync.any.pred  %p1, %p7, -1;
+PTX shuffle: shfl.sync.idx.b32  %r1, %r6, 0, 31, -1;
+PTX redux: redux.sync.add.s32  %r5, %r2, %r10;
+PTX warp_barrier: bar.warp.sync  -1;
+PTX cta_arrive: barrier.arrive  1, 64;
+PTX cta_sync: barrier.sync  1, 64;
+PTX cta_red: barrier.red.or.pred  %p2, %r11, %r10, %p1;
+PASS
+```
+
+结论：
+
+- `elect_sync` 恰好产生一个 winner；本次运行选择 lane 0，但验证只检查“唯一且 marker 匹配”，不把 lane 0 当作 ISA 保证；
+- predicate `lane < 8` 的 ANY/ALL/BALLOT 分别得到 1、0、`0xff`；lane 7 的数值 70 成功广播，`0..31` redux sum 为 496；
+- 64-thread named CTA barrier 完成 producer/consumer handoff，CTA OR 与 POPC 得到 1 和 32；
+- PTX 中八类预期指令族全部存在；当前 B200 toolchain 对 named CTA barrier 使用 `barrier.arrive/sync/red` 拼写，因此检查器按语义 family 同时接受新旧合法拼写。
+
+### L1/L2/L4：双 stage mbarrier ping-pong
+
+执行命令：
+
+```bash
+cd /volume/njiang/workspace/sandbox/cutlass
+/volume/njiang/workspace/sandbox/.venv-cutedsl-4.7/bin/python \
+  discussion/code/12_synchronization/mbarrier_pingpong.py
+```
+
+关键输出：
+
+```text
+num_tiles=1, stages=2, wraps=0, dst0=0.0, max_abs_error=0.0e+00
+num_tiles=2, stages=2, wraps=1, dst0=32.0, max_abs_error=0.0e+00
+num_tiles=3, stages=2, wraps=1, dst0=96.0, max_abs_error=0.0e+00
+num_tiles=5, stages=2, wraps=2, dst0=320.0, max_abs_error=0.0e+00
+num_tiles=8, stages=2, wraps=4, dst0=896.0, max_abs_error=0.0e+00
+PTX init: mbarrier.init.shared.b64  [%r2], %r18;
+PTX init_fence: fence.mbarrier_init.release.cluster;
+PTX arrive: mbarrier.arrive.shared.b64  %rd3, [%r5];
+PTX wait_parity: mbarrier.try_wait.parity.acquire.cta.shared::cta.b64 ...;
+PTX invalidate: mbarrier.inval.shared.b64  [%r2];
+PASS
+```
+
+结论：
+
+- 一个 producer warp、一个 consumer warp、两个 stages 和每 stage 一对 full/empty barrier 形成闭合协议；
+- runtime tile count 跨过 0、1、2、4 次 stage ring wrap，覆盖两种 parity；
+- producer signal full 和 consumer release empty 前都有显式 warp rendezvous；退出前进行 CTA rendezvous，再 invalidate barrier storage；
+- 五组结果与按 tile 规约的 PyTorch reference 精确一致，mbarrier lifecycle 指令族全部在 PTX 中确认。
+
+### L1/L2/L4：CTA cluster、DSMEM 与 `mapa`
+
+在把最初的 2-CTA ring 扩展到 4 CTAs 时，协议审计发现“通知 successor、等待 predecessor、再读取 successor”只在 cluster size 为 2（predecessor 与 successor 相同）时天然闭合；对更大 ring，数值偶然正确并不能证明 successor 写入已发布。最终实现改为“写本地值后通知 predecessor、等待 successor 通知本地 barrier、再读取 successor”，随后重新运行 2/4-CTA 两组测试。
+
+执行命令：
+
+```bash
+cd /volume/njiang/workspace/sandbox/cutlass
+/volume/njiang/workspace/sandbox/.venv-cutedsl-4.7/bin/python \
+  discussion/code/12_synchronization/cluster_dsmem_ring.py --cluster-size 2
+/volume/njiang/workspace/sandbox/.venv-cutedsl-4.7/bin/python \
+  discussion/code/12_synchronization/cluster_dsmem_ring.py --cluster-size 4
+```
+
+关键输出：
+
+```text
+cluster_size=2, dst=[1, 0], PASS
+cluster_size=4, dst=[1, 2, 3, 0], PASS
+PTX mapa: mapa.shared::cluster.u32  %r13, %r2, %r5;
+PTX cluster_arrive: barrier.cluster.arrive.relaxed;
+PTX cluster_wait: barrier.cluster.wait;
+PTX remote_arrive: mbarrier.arrive.release.cluster.shared::cluster.b64 _, [%rd2];
+```
+
+结论：
+
+- 2-CTA 和 4-CTA cluster 都正确读取 successor rank；
+- local mbarrier initialization 在第一次 remote access 前经过 init fence 与 cluster rendezvous；
+- 每个 CTA 在写完本地值后通知 predecessor，并等待 successor 通知自己的 local barrier，因此 wait 与随后读取 successor 的目标严格匹配；remote arrive 使用 cluster scope，remote data load 使用 `mapa.shared::cluster`；
+- 所有 CTA 在 invalidate/exit 前再次 cluster rendezvous，保护 peer DSMEM lifetime；
+- PTX 检查按 `mbarrier.arrive` 与 `shared::cluster` 同行出现判断 remote arrive，允许 order/scope qualifier 插入其中；三个第 12 章程序使用彼此隔离的 artifact 子目录，避免交叉命中其他程序的指令证据。
+
+---
+
+## 第 13 章：`cp.async` 与 `ldmatrix/stmatrix`
+
+验证代码：
+
+- [`13_async_copy_and_matrix/cp_async_roundtrip.py`](../code/13_async_copy_and_matrix/cp_async_roundtrip.py)
+- [`13_async_copy_and_matrix/ldmatrix_roundtrip.py`](../code/13_async_copy_and_matrix/ldmatrix_roundtrip.py)
+
+### L1/L2/L4：per-thread `cp.async`、copy group 与 CTA publication
+
+执行命令：
+
+```bash
+cd /volume/njiang/workspace/sandbox/cutlass
+CUDA_VISIBLE_DEVICES=0 \
+  /volume/njiang/workspace/sandbox/.venv-cutedsl-4.7/bin/python \
+  discussion/code/13_async_copy_and_matrix/cp_async_roundtrip.py
+```
+
+输出：
+
+```text
+n=512, tile=512, max_abs_error=0.0e+00
+n=2048, tile=512, max_abs_error=0.0e+00
+n=8192, tile=512, max_abs_error=0.0e+00
+PTX copy: cp.async.cg.shared.global [%r8], [%rd7], 16;
+PTX commit: cp.async.commit_group;
+PTX wait: cp.async.wait_group  0;
+PTX cta_barrier: barrier.sync  0;
+PASS
+```
+
+结论：
+
+- 一个动态 compiled handle 覆盖 1、4、16 个 CTA tiles；
+- 每个 thread 发出一条 16-byte `cp.async.cg`，copy-group commit/wait 均得到 PTX 证据；
+- lane `t` 消费 lane `(t+1) mod 128` 的 SMEM vector，再写回该 vector 的 global slot，因而 CTA barrier 承担真实的 cross-thread publication，而非装饰性同步；
+- 三组输出与输入逐位一致；示例明确只接受完整 512-element tiles，不声称覆盖 residue。
+
+### L1/L2/L4：b16 matrix fragment x1/x2/x4
+
+执行命令：
+
+```bash
+cd /volume/njiang/workspace/sandbox/cutlass
+CUDA_VISIBLE_DEVICES=0 \
+  /volume/njiang/workspace/sandbox/.venv-cutedsl-4.7/bin/python \
+  discussion/code/13_async_copy_and_matrix/ldmatrix_roundtrip.py
+```
+
+关键输出：
+
+```text
+dtype=fp16, x1, shape=(8, 8), words_per_lane=1: PASS
+dtype=fp16, x2, shape=(16, 8), words_per_lane=2: PASS
+dtype=fp16, x4, shape=(32, 8), words_per_lane=4: PASS
+dtype=bf16, x1, shape=(8, 8), words_per_lane=1: PASS
+dtype=bf16, x2, shape=(16, 8), words_per_lane=2: PASS
+dtype=bf16, x4, shape=(32, 8), words_per_lane=4: PASS
+PTX ldmatrix: ldmatrix.sync.aligned.m8n8.x1.shared.b16 ...
+PTX ldmatrix: ldmatrix.sync.aligned.m8n8.x2.shared.b16 ...
+PTX ldmatrix: ldmatrix.sync.aligned.m8n8.x4.shared.b16 ...
+PTX stmatrix: stmatrix.sync.aligned.m8n8.x1.shared.b16 ...
+PTX stmatrix: stmatrix.sync.aligned.m8n8.x2.shared.b16 ...
+PTX stmatrix: stmatrix.sync.aligned.m8n8.x4.shared.b16 ...
+PASS
+```
+
+结论：
+
+- FP16/BF16 与 x1/x2/x4 的六组数值 roundtrip 全部 bit-exact；
+- 每个 8×8 b16 fragment 对应每 lane 一个 32-bit carrier word，xN 返回 N words/lane；
+- retained PTX 独立确认六种 instruction specialization；
+- 示例整体要求 SM90+，因为 `stmatrix` 不是 SM80 指令；`ldmatrix` 的较早架构可用性在正文中单独说明。
+
+---
+
+## 第 14 章：TMA descriptor、partition、proxy 与 multicast
+
+验证代码：
+
+- [`14_tma/tma_copy_v0.py`](../code/14_tma/tma_copy_v0.py)
+- [`14_tma/tma_transpose_v1.py`](../code/14_tma/tma_transpose_v1.py)
+- [`14_tma/tma_multicast.py`](../code/14_tma/tma_multicast.py)
+
+### L1/L2/L4：`TmaInfo`、`group_modes` 与 `tma_partition`
+
+执行命令：
+
+```bash
+cd /volume/njiang/workspace/sandbox/cutlass
+CUDA_VISIBLE_DEVICES=0 \
+  /volume/njiang/workspace/sandbox/.venv-cutedsl-4.7/bin/python \
+  discussion/code/14_tma/tma_copy_v0.py
+```
+
+输出：
+
+```text
+shape=(128, 128), tiles=(1,1): PASS
+shape=(256, 128), tiles=(2,1): PASS
+shape=(256, 384), tiles=(2,3): PASS
+PTX tma_load: cp.async.bulk.tensor.2d.shared::cta.global.tile.mbarrier::complete_tx::bytes...
+PTX tma_store: cp.async.bulk.tensor.2d.global.shared::cta.tile.bulk_group...
+PTX expect_tx: mbarrier.expect_tx.relaxed.cta.shared.b64 ...
+PTX store_commit: cp.async.bulk.commit_group;
+PTX store_wait: cp.async.bulk.wait_group  0;
+PASS
+```
+
+结论：
+
+- `128×128` FP16 SMEM tile 对应 32768 transaction bytes；
+- `local_tile → group_modes → tma_partition → (None,bidx,bidy)` 覆盖 1×1、2×1 和 2×3 tile grids；
+- 所有输出与输入逐位一致；
+- retained PTX 分别命中 G2S TMA load、S2G TMA store、transaction expectation 和 store bulk-group completion，避免仅凭共同 token 把 load 误认成 store。
+
+### L1/L2/L4：双 SMEM buffer TMA transpose 与 proxy fence
+
+执行命令：
+
+```bash
+cd /volume/njiang/workspace/sandbox/cutlass
+CUDA_VISIBLE_DEVICES=0 \
+  /volume/njiang/workspace/sandbox/.venv-cutedsl-4.7/bin/python \
+  discussion/code/14_tma/tma_transpose_v1.py
+```
+
+输出：
+
+```text
+shape=(128, 128) -> (128, 128): PASS
+shape=(256, 128) -> (128, 256): PASS
+shape=(256, 384) -> (384, 256): PASS
+PTX tma_load: cp.async.bulk.tensor.2d.shared::cta.global.tile.mbarrier::complete_tx::bytes...
+PTX proxy_fence: fence.proxy.async.shared::cta;
+PTX tma_store: cp.async.bulk.tensor.2d.global.shared::cta.tile.bulk_group...
+PTX store_wait: cp.async.bulk.wait_group  0;
+PASS
+```
+
+开发中第一次运行发生 `unspecified launch failure`。协议审计确认 `elect_one` 是 warp scope：128-thread CTA 的初版让四个 warps 都初始化同一 barrier 并发出 TMA。修复后只有 warp 0 执行 barrier init/load/store issuer path，四个 warps共同完成 SMEM transpose；store commit/wait 保持 warp-uniform。
+
+最终结论：
+
+- 单 tile 方阵与两组非方形多 tile shape 均与 `src.T` 逐位一致；
+- tile 内 `(row,col)→(col,row)` 和 global grid `(tile_m,tile_n)→(tile_n,tile_m)` 均已覆盖；
+- thread generic-proxy writes 与 TMA async-proxy read 之间的 fence 得到 PTX 证据；
+- 修复过程说明“唯一 elected lane”必须同时限定在哪个 warp 中产生。
+
+### L1/L4：two-CTA TMA multicast
+
+执行命令：
+
+```bash
+cd /volume/njiang/workspace/sandbox/cutlass
+CUDA_VISIBLE_DEVICES=0 \
+  /volume/njiang/workspace/sandbox/.venv-cutedsl-4.7/bin/python \
+  discussion/code/14_tma/tma_multicast.py
+```
+
+输出：
+
+```text
+cluster=2, tile=(128,64), both CTA copies exact
+PTX multicast: cp.async.bulk.tensor.2d.shared::cluster.global.tile.mbarrier::complete_tx::bytes.multicast::cluster.cta_group::2 ...
+PTX expect_tx: mbarrier.arrive.expect_tx.shared.b64 ...
+PTX cluster_arrive: barrier.cluster.arrive.relaxed;
+PTX cluster_wait: barrier.cluster.wait;
+PASS
+```
+
+结论：
+
+- CTA rank 0 只发出一次 TMA multicast，mask `0b11` 把同一 `128×64` FP16 tile 投递给两个 CTAs；
+- leader transaction count 为单份 descriptor bytes 的两倍；
+- leader 等待两份 completion 后，通过 cluster barrier 把 ready state 发布给 non-leader；
+- 两个 CTA 的输出与同一输入 tile 逐位一致，PTX 确认 multicast、`cta_group::2` 与 cluster barrier；
+- 本例固定为 SM100 two-CTA routing，不把结论外推到任意 cluster size。
 
 ---
 

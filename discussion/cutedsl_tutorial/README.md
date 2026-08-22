@@ -31,7 +31,14 @@
 
 ### 阶段二：SMEM、同步、TMA、流水线与规约
 
-对应第 11–16 章，尚未开始正文。下一章从经典 SMEM tiled kernel 开始，并复用第一阶段建立的 TV ownership。
+| 章 | 内容 | 正文 | 代码 | B200 验证 |
+|---:|---|---|---|---|
+| 11 | [Shared Memory 分配与经典 tiled kernel](11_shared_memory_and_tiled_kernel.md) | 完成 | 1 个示例、2 个 specialization | L0/L1/L2/L4 通过（4.7.0） |
+| 12 | [warp/CTA/cluster 同步原语](12_synchronization_primitives.md) | 完成 | 3 个示例 | L0/L1/L2/L4 通过（4.7.0） |
+| 13 | [`cp.async` 与 `ldmatrix/stmatrix`](13_cp_async_and_matrix_fragments.md) | 完成 | 2 个示例、7 个 specialization | L0/L1/L2/L4 通过（4.7.0） |
+| 14 | [TMA 从 descriptor 到 partition](14_tma_descriptor_and_partition.md) | 完成 | 3 个示例 | L0/L1/L2/L4 通过（4.7.0） |
+
+第 11 章建立同步 SMEM baseline，第 12 章把参与者、可见性、mbarrier phase 和 cluster lifetime 组织成统一同步协议；第 13 章完成 SM80 copy group 与 warp matrix fragment 数据路径，第 14 章完成 TMA descriptor、partition、proxy ordering 和 multicast。下一章把这些 primitive 组织成多 stage、warp-specialized pipeline。
 
 ### 阶段三：三代 Tensor Core 与渐进 GEMM
 
