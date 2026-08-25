@@ -997,6 +997,232 @@ PASS
 
 ---
 
+## 第 17 章：MMA Atom、TiledMMA 与 partition 公共模型
+
+验证代码：
+
+- [`17_mma_model/mma_layout_inspector.py`](../code/17_mma_model/mma_layout_inspector.py)
+
+### L1/L4：单 warp 与 2×4-warp ownership inspector
+
+执行命令：
+
+```bash
+cd /volume/njiang/workspace/sandbox/cutlass
+CUDA_VISIBLE_DEVICES=0 \
+  /volume/njiang/workspace/sandbox/.venv-cutedsl-4.7/bin/python \
+  discussion/code/17_mma_model/mma_layout_inspector.py
+```
+
+关键输出：
+
+```text
+atom_layout=(1,1,1):
+  partition A shape: ((2,2,2),1,1)
+  partition B shape: ((2,2),1,1)
+  partition C shape: ((2,2),1,1)
+  FP16 max_error=9.537e-07
+  BF16 max_error=4.768e-07
+  A domain=256 multiplicity=1
+  B domain=128 multiplicity=1
+  C domain=128 multiplicity=1
+
+atom_layout=(2,4,1):
+  Thr Layout VMNK: (32,2,4,1):(1,32,64,0)
+  FP16 max_error=1.907e-06
+  A domain=512  multiplicity=4
+  B domain=512  multiplicity=2
+  C domain=1024 multiplicity=1
+
+PTX ldmatrix: ldmatrix.sync.aligned.m8n8.x4.shared.b16 ...
+PTX fp16 mma: mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 ...
+PTX bf16 mma: mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 ...
+PASS
+```
+
+结论：
+
+- 单 warp 和 8-warp TiledMMA 都与 `A.float() @ B.float().T` reference 对齐；
+- identity Tensor 导出的坐标证明 complete coverage；
+- `2×4×1` replication 中 A 被四个 N-warps复用、B 被两个 M-warps复用，而 C 保持单 owner；
+- retained PTX 确认 `ldmatrix.x4` 与两种 dtype 的真实 `mma.sync.m16n8k16`；
+- 本例只做 ownership/instruction correctness，不做性能声明。
+
+---
+
+## 第 18 章：Ampere warp MMA 与 TensorOp GEMM
+
+验证代码：
+
+- [`18_ampere_tensorop/ampere_tensorop_gemm.py`](../code/18_ampere_tensorop/ampere_tensorop_gemm.py)
+
+### L1/L2/L4：two-stage cp.async + ldmatrix + 8-warp MMA GEMM
+
+执行命令：
+
+```bash
+cd /volume/njiang/workspace/sandbox/cutlass
+CUDA_VISIBLE_DEVICES=0 \
+  /volume/njiang/workspace/sandbox/.venv-cutedsl-4.7/bin/python \
+  discussion/code/18_ampere_tensorop/ampere_tensorop_gemm.py
+```
+
+输出：
+
+```text
+dtype=fp16, shape=(32,32,64), CTA tiles=(1,1,1), max_error=9.537e-06: PASS
+dtype=fp16, shape=(64,96,128), CTA tiles=(2,3,2), max_error=2.289e-05: PASS
+dtype=fp16, shape=(96,64,192), CTA tiles=(3,2,3), max_error=3.815e-05: PASS
+dtype=bf16, shape=(32,32,64), CTA tiles=(1,1,1), max_error=3.815e-06: PASS
+dtype=bf16, shape=(64,96,128), CTA tiles=(2,3,2), max_error=1.144e-05: PASS
+dtype=bf16, shape=(96,64,192), CTA tiles=(3,2,3), max_error=1.907e-05: PASS
+PTX cp.async: cp.async.cg.shared.global ..., 16, 16;
+PTX ldmatrix: ldmatrix.sync.aligned.m8n8.x4.shared.b16 ...
+PTX mma: mma.sync.aligned.m16n8k16.row.col.f32.{f16|bf16}...f32 ...
+PTX cta barrier: bar.sync 0;
+PASS
+```
+
+结论：
+
+- 固定 `32×32×64` CTA tile 由 `2×4×1` warp atoms（256 threads）覆盖；
+- 每线程对 A/B 各发一个 128-bit `cp.async`，两级 SMEM ring 覆盖 1/2/3 个 K tiles；
+- 每 stage 通过四个 `ldmatrix → mma.sync` K-block 累加到 FP32 RMEM fragment；
+- 三组 shape 覆盖单 CTA、多 CTA、stage 刚好填满和多次 stage reuse；
+- FP16/BF16 六组全部通过 PyTorch reference，retained PTX 确认完整数据路径；
+- plain row-major SMEM、direct epilogue 和整 tile shape contract 是教学取舍，L3 性能结论留到统一 benchmark。
+
+---
+
+## 第 19 章：Hopper WGMMA、TMA 与 Warpgroup Pipeline
+
+验证代码：
+
+- [`19_hopper_wgmma/hopper_wgmma_gemm.py`](../code/19_hopper_wgmma/hopper_wgmma_gemm.py)
+
+### L0/L4：B200 上交叉编译 SM90a WGMMA
+
+执行命令：
+
+```bash
+cd /volume/njiang/workspace/sandbox/cutlass
+CUDA_VISIBLE_DEVICES=0 \
+  /volume/njiang/workspace/sandbox/.venv-cutedsl-4.7/bin/python \
+  discussion/code/19_hopper_wgmma/hopper_wgmma_gemm.py
+```
+
+输出：
+
+```text
+PTX TMA load: cp.async.bulk.tensor.2d.shared::cta.global...mbarrier...
+PTX WGMMA fence: wgmma.fence.sync.aligned;
+PTX WGMMA MMA: wgmma.mma_async.sync.aligned.m64n64k16.f32.f16.f16 ...
+PTX WGMMA commit: wgmma.commit_group.sync.aligned;
+PTX WGMMA wait: wgmma.wait_group.sync.aligned 0;
+COMPILE-ONLY PASS: built sm_90a WGMMA on device 10.0;
+numerical launch requires H100/H200 (SM90a)
+```
+
+架构限制审计：
+
+```text
+在 B200 上直接启动官方 sm_90a Hopper GEMM：
+cudaErrorNoKernelImageForDevice (error code 209)
+```
+
+结论：
+
+- B200 环境真实完成 SM90a AOT 编译，TMA 与 WGMMA fence/MMA/commit/wait 指令齐全；
+- SM90a cubin 不能在 SM100 B200 启动，因此未执行数值 reference；
+- 当前只标 L0/L4，不把 compile-only 误记为 L1；H100/H200 补验项保留。
+
+---
+
+## 第 20 章：Blackwell tcgen05、TMEM 与 UMMA
+
+验证代码：
+
+- [`20_blackwell_tcgen05/tmem_roundtrip.py`](../code/20_blackwell_tcgen05/tmem_roundtrip.py)
+- [`20_blackwell_tcgen05/tcgen05_1cta_gemm.py`](../code/20_blackwell_tcgen05/tcgen05_1cta_gemm.py)
+- [`20_blackwell_tcgen05/tcgen05_2cta_gemm.py`](../code/20_blackwell_tcgen05/tcgen05_2cta_gemm.py)
+
+### L1/L4：TMEM lifecycle roundtrip
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+  /volume/njiang/workspace/sandbox/.venv-cutedsl-4.7/bin/python \
+  discussion/code/20_blackwell_tcgen05/tmem_roundtrip.py
+```
+
+关键输出：
+
+```text
+shape=(32,32), exact roundtrip: PASS
+PTX alloc: tcgen05.alloc.cta_group::1...
+PTX store: tcgen05.st.sync.aligned.32x32b.x32...
+PTX store wait: tcgen05.wait::st...
+PTX load: tcgen05.ld.sync.aligned.32x32b.x32...
+PTX load wait: tcgen05.wait::ld...
+PTX dealloc: tcgen05.dealloc.cta_group::1...
+PTX relinquish: tcgen05.relinquish_alloc_permit.cta_group::1...
+PASS
+```
+
+### L1/L4：CTA_1 FP16 tcgen05 GEMM
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+  /volume/njiang/workspace/sandbox/.venv-cutedsl-4.7/bin/python \
+  discussion/code/20_blackwell_tcgen05/tcgen05_1cta_gemm.py
+```
+
+输出：
+
+```text
+shape=(128,128,64), bit-exact FP32 output: PASS
+PTX TMA: cp.async.bulk.tensor.2d.shared::cta.global...
+PTX alloc: tcgen05.alloc.cta_group::1...
+PTX MMA: tcgen05.mma.cta_group::1.kind::f16...
+PTX commit: tcgen05.commit.cta_group::1...mbarrier...
+PTX TMEM load: tcgen05.ld.sync.aligned.32x32b.x32...
+PTX dealloc: tcgen05.dealloc.cta_group::1...
+PASS
+```
+
+### L1/L2/L4：CTA_2 cluster GEMM
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+  /volume/njiang/workspace/sandbox/.venv-cutedsl-4.7/bin/python \
+  discussion/code/20_blackwell_tcgen05/tcgen05_2cta_gemm.py
+```
+
+输出：
+
+```text
+shape=(256,256,64), cluster tiles=(1,1), max_error=0.000e+00: PASS
+shape=(512,256,64), cluster tiles=(2,1), max_error=0.000e+00: PASS
+shape=(256,512,64), cluster tiles=(1,2), max_error=0.000e+00: PASS
+PTX cluster TMA: ...shared::cluster.global...cta_group::2...
+PTX CTA_2 alloc: tcgen05.alloc.cta_group::2...
+PTX CTA_2 MMA: tcgen05.mma.cta_group::2.kind::f16...
+PTX CTA_2 commit: tcgen05.commit.cta_group::2...multicast::cluster...
+PTX CTA_2 dealloc: tcgen05.dealloc.cta_group::2...
+PTX cluster arrive: barrier.cluster.arrive.relaxed;
+PTX cluster wait: barrier.cluster.wait;
+PASS
+```
+
+结论：
+
+- 32-column TMEM store/load 与完整 allocation lifecycle 逐位通过；
+- CTA_1 的 TMA → descriptor → 四次 K16 MMA → FP32 TMEM → GMEM 路径逐位通过；
+- CTA_2 三组 cluster grid 均通过，覆盖单 cluster 与 M/N 多 cluster 调度；
+- retained PTX 证明 CTA_1/CTA_2 group、TMEM、completion mbarrier 与 cluster protocol；
+- 第 20 章在 B200 / CuTe DSL 4.7.0 完成 L1/L2/L4 闭环。
+
+---
+
 ## 后续记录约定
 
 每个新示例至少记录：

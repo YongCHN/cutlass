@@ -7,4 +7,4 @@
 - [B200 实机验证日志](cutedsl_tutorial/validation_log.md)
 - [已验证示例：Vector Add](code/01_vector_add/README.md)
 
-后续章节正文放在 `discussion/cutedsl_tutorial/`，配套可执行示例放在 `discussion/code/`。第一交付阶段第 0–10 章和第二阶段第 11–16 章均已完成；正文与代码在 CuTe DSL 4.7.0 / NVIDIA B200 上完成相应等级验证。下一阶段从 MMA Atom、TiledMMA 与 partition 公共模型开始，随后进入三代 Tensor Core 和渐进 GEMM。
+后续章节正文放在 `discussion/cutedsl_tutorial/`，配套可执行示例放在 `discussion/code/`。第一交付阶段第 0–10 章和第二阶段第 11–16 章均已完成；第三阶段已完成第 17–20 章，覆盖 MMA 公共模型、Ampere warp MMA、Hopper WGMMA 与 Blackwell tcgen05/TMEM。正文与代码按 CuTe DSL 4.7.0 完成相应等级验证，下一章进入渐进 GEMM。

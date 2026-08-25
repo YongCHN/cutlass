@@ -40,11 +40,19 @@
 | 15 | [多级流水线与 warp specialization](15_multistage_pipeline_and_warpspec.md) | 完成 | 2 个示例、5 个 stage specialization | L0/L1/L2/L4 通过（4.7.0） |
 | 16 | [分层规约与 Online Softmax](16_hierarchical_reduction_and_softmax.md) | 完成 | 2 个示例 | L0/L1/L2/L4 通过（4.7.0） |
 
-第 11–16 章已经形成第二阶段闭环：同步 SMEM baseline → participant/completion 协议 → SM80 copy group 与 warp matrix fragment → TMA descriptor/partition → 多级 warp-specialized pipeline → thread/warp/CTA/cluster reduction 与 online Softmax。下一阶段从第 17 章的 MMA 公共模型开始，逐代进入 SM80、SM90 和 SM100 Tensor Core。
+第 11–16 章已经形成第二阶段闭环：同步 SMEM baseline → participant/completion 协议 → SM80 copy group 与 warp matrix fragment → TMA descriptor/partition → 多级 warp-specialized pipeline → thread/warp/CTA/cluster reduction 与 online Softmax。
 
 ### 阶段三：三代 Tensor Core 与渐进 GEMM
 
-对应第 17–24 章，下一步从第 17 章开始。
+| 章 | 内容 | 正文 | 代码 | B200 验证 |
+|---:|---|---|---|---|
+| 17 | [MMA Atom、TiledMMA 与 partition 公共模型](17_mma_atom_tiledmma_and_partition.md) | 完成 | 1 个 inspector、4 个 specialization | L1/L4 通过（4.7.0） |
+| 18 | [Ampere warp MMA 与 TensorOp GEMM](18_ampere_warp_mma.md) | 完成 | 1 个示例、6 个 shape/dtype cases | L1/L2/L4 通过（4.7.0） |
+| 19 | [Hopper WGMMA、TMA 与 Warpgroup Pipeline](19_hopper_wgmma.md) | 完成 | 1 个最小 GEMM | B200 L0/L4 通过；H100/H200 L1 待补 |
+| 20 | [Blackwell tcgen05、TMEM 与 UMMA](20_blackwell_tcgen05_tmem_umma.md) | 完成 | 3 个示例 | L1/L2/L4 通过（4.7.0） |
+| 21–24 | 渐进 GEMM、Blackwell 演化、epilogue、低精度 | 待构建 | - | - |
+
+第 17–20 章已经把统一 MMA 模型落到三代硬件路径：SM80 `mma.sync`、SM90a WGMMA 和 SM100 tcgen05/TMEM。Hopper 代码已在 B200 完成真实 SM90a 编译和 PTX 审计，但因 cubin 架构不兼容，数值 L1 明确保留到 H100/H200；Blackwell 三组代码已在 B200 完成数值与 PTX 闭环。下一步进入第 21 章渐进 GEMM。
 
 ### 阶段四：生产主题与工程化
 
